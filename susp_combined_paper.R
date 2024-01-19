@@ -19,9 +19,7 @@ library(boot)
 
 ######################Data preparation#########################################
 
-#Set the working directory to the folder with all the FOI functions
-setwd("C:/Users/Conor.Egan/Documents")
-uam = read_dta('Conor Egan dataset_13092022.dta')
+#Load in data - called uam
 
 #Restrict to survey years 2011-2020
 uam = uam %>%
