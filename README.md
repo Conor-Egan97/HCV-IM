@@ -1,2 +1,8 @@
 # Hepatitis C Incidence Models (HCVIM)
 Code to fit flexible parametric and non-parametric models to derive estimates of incidence from seroprevalence data.
+
+- `PC_FOI.R` fits a multiplicative piecewise constant model, with no interaction terms between injecting duration and calendar time, to Hepatitis C antibody prevalence data. The model is fit to the force of infeciton. Bootstrap methods are used to obtain confidence intervals for the force of infection.
+- `FP_FOI.R` fits a second-degree fractional polynomial model, with interaction terms between injecting duration and calendar time, to Hepatitis C antibody prevalence data. The model is fit to the cumulative hazard from which the force of infeciton is derived. Bootstrap methods are used to obtain confidence intervals for the force of infection.
+- `NCS_FOI.R` fits a natural cubic spline model, with interaction terms between the main effects and spline terms, to Hepatitis C antibody prevalence data. In the injecting duration dimension there are seven knots specified based on the density of the data and in the calendar time dimension there aer three knots specified based on the density of the data. The model is fit to the cumulative hazard from which the force of infeciton is derived. Bootstrap methods are used to obtain confidence intervals for the force of infection.
+- `foi_combined_paper.R` produces a plot, jointly displaying, the estimates from the force of infection obtained from models in the scripts `PC_FOI.R`, `FP_FOI.R` and `NCS_FOI.R`.
+- `susp_combined_paper.R` produces a plot, jointly displaying, the actual proportion susceptible and the estimates of the proportion susceptible obtained from models in the scripts `PC_FOI.R`, `FP_FOI.R` and `NCS_FOI.R`. 
