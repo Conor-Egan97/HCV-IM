@@ -1,4 +1,4 @@
-# Hepatitis C Incidence Models (HCVIM)
+# Hepatitis C Incidence Models (HCV-IM)
 Code to fit flexible parametric and semi-parametric models to derive estimates of incidence from seroprevalence data.
 
 - `PC_FOI.R` fits a multiplicative piecewise constant model, with no interaction terms between injecting duration and calendar time, to Hepatitis C antibody prevalence data. The model is fit to the force of infeciton. Bootstrap methods are used to obtain confidence intervals for the force of infection.
