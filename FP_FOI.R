@@ -1,140 +1,144 @@
-library(magrittr)
+#Load necessary packages
 library(dplyr)
-library(tidyverse)
-library(mfp)
-library(lmtest)
-library(ciTools)
-library(ResourceSelection)
-library(scatterplot3d)
-library(berryFunctions)
-library(haven)
 library(boot)
+library(ggplot2)
 
-######################Data preparation#########################################
+#------------------ Data Preparation ------------------
 
-#Load in data - called uam
+#Load simulated data
+uam = read.csv("~/Desktop/simulated_uam_data.csv")
 
-#Restrict to survey years 2011-2020
-uam = uam %>%
-  subset(year %in% c("2011","2012","2013","2014","2015",
-                     "2016","2017","2018","2019","2020"))
+#Filter for survey years 2011–2020
+uam = uam %>% filter(year %in% as.character(2011:2020))
 
-#Assume injecting duration of one
-uam$injdur[which(uam$injdur == 0)] = 1
+#Replace 0 injecting duration with 1
+uam$injdur[uam$injdur == 0] = 1
 
-#Only keep the complete cases for the variables of interest in this analysis
-keep = c("injdur", "hcvdbs", "year")
-uam = uam[keep]
-uam = uam[complete.cases(uam), ]
+#Keep only complete cases for relevant variables
+uam = uam %>% select(injdur, hcvdbs, year) %>% na.omit()
 
-#Create a variable that indicates survival i.e., opposite of HCV dbs status
+#Create survival variable: 1 = HCV negative, 0 = HCV positive
 uam$surv = ifelse(uam$hcvdbs == 1, 0, 1)
 
-######################Fractional polynomial#####################################
-#Create data frame of variables of interest - order by injecting duration
+#------------------ Fractional Polynomial Modeling ------------------
+
+#Sort data by injecting duration
 y = uam$surv[order(uam$injdur)]
 a = uam$injdur[order(uam$injdur)]
 t = uam$year[order(uam$injdur)]
-neg = table(y, round(a), t)[1, , ]
-neg = as.vector(t(neg))
-pos = table(y, round(a), t)[2, , ]
-pos = as.vector(t(pos))
+
+#Construct outcome tables
+neg = as.vector(t(table(y, round(a), t)[1, , ]))
+pos = as.vector(t(table(y, round(a), t)[2, , ]))
 tot = neg + pos
-df1 = data.frame(neg,pos,tot)
-df1 = subset(df1, tot!=0)
-df = unique(data.frame(a,t))
+df1 = data.frame(neg, pos, tot) %>% filter(tot != 0)
+df = unique(data.frame(a, t))
 
-#Best fitting fractional polynomial
-model.fpIJ_T = glm(formula = y ~ I(a^(0.4)) + I(a^(2.8)) +
-                     I(a^(0.4)):I(t^(0.3)) + I(a^(2.8)):I(t^(0.4)) - 1,
-                   family = binomial(link = log))
+#Fit fractional polynomial model
+model.fpIJ_T = glm(
+  y ~ I(a^0.4) + I(a^2.8) + I(a^0.4):I(t^0.3) + I(a^2.8):I(t^0.4) - 1,
+  family = binomial(link = "log")
+)
 
-#Survival probability predictions
-p.at = predict(model.fpIJ_T, type = "response", se.fit=T)
+#Predict survival probabilities
+p.at = predict(model.fpIJ_T, type = "response", se.fit = TRUE)
 
-#Store in data frame - will combine with other model estimates below
-x1 = data.frame(age = df$a, time = df$t, prob.fp = unique(p.at$fit),
-                lower.fp = unique(p.at$fit) - 1.96*unique(p.at$se.fit),
-                upper.fp = unique(p.at$fit) + 1.96*unique(p.at$se.fit),
-                surv = df1$pos/df1$tot, n = df1$tot)
+#Create predictions data frame
+x1 = data.frame(
+  age = df$a,
+  time = df$t,
+  prob.fp = unique(p.at$fit),
+  lower.fp = unique(p.at$fit) - 1.96 * unique(p.at$se.fit),
+  upper.fp = unique(p.at$fit) + 1.96 * unique(p.at$se.fit),
+  surv = df1$pos / df1$tot,
+  n = df1$tot
+)
+
+#------------------ Bootstrap for Force of Infection ------------------
 
 set.seed(147)
-
-#Make a data frame for boot CI
 df_1 = data.frame(y, a, t)
 
-#Make a function that returns the table of plausible values
+#Function to compute FOI from resampled data
 FOI_CI = function(data, indices) {
-  d = data[indices,] # allows boot to select sample
-  df  = as.data.frame(expand.grid(1:53, 2011:2020))
-  names(df) = c("a", "t")
-  fit <- glm(formula = d$y ~ I(d$a^(0.4)) + I(d$a^(2.8)) +
-               I(d$a^(0.4)):I(d$t^0.3) + I(d$a^(2.8)):I(d$t^0.4) - 1,
-             family = binomial(link = log))
-  foi = as.numeric(coef(fit)[1])*0.4*((df$a)^(-0.6)) +
-    as.numeric(coef(fit)[2])*2.8*((df$a)^(1.8)) +
-    as.numeric(coef(fit)[3])*0.4*((df$a)^(-0.6))*((df$t)^(0.3)) +
-    as.numeric(coef(fit)[4])*2.8*((df$a)^(1.8))*((df$t)^(0.4)) 
-  foi = -foi
-  return(foi)
+  d = data[indices, ]
+  df = expand.grid(a = 1:30, t = 2011:2020)
+  
+  fit = tryCatch({
+    glm(
+      formula = d$y ~ I(d$a^0.4) + I(d$a^2.8) +
+        I(d$a^0.4):I(d$t^0.3) + I(d$a^2.8):I(d$t^0.4) - 1,
+      family = binomial(link = "log")
+    )
+  }, error = function(e) return(NULL))
+  
+  if (is.null(fit)) return(rep(NA, nrow(df)))
+  
+  coefs = coef(fit)
+  if (any(is.na(coefs))) return(rep(NA, nrow(df)))
+  
+  foi = coefs[1] * 0.4 * (df$a^-0.6) +
+    coefs[2] * 2.8 * (df$a^1.8) +
+    coefs[3] * 0.4 * (df$a^-0.6) * (df$t^0.3) +
+    coefs[4] * 2.8 * (df$a^1.8) * (df$t^0.4)
+  
+  return(-foi)
 }
 
-# bootstrapping with 1000 replications
-results = boot(data=df_1, statistic=FOI_CI, R=1000)
+#Bootstrap FOI estimates
+results = boot(data = df_1, statistic = FOI_CI, R = 1000)
 
-#Make a table with the plausible FOI values
-FOI_table = as.data.frame(expand.grid(unique(a), unique(t)))
+#Create table of plausible FOI values
+FOI_table = expand.grid(injdur = unique(a), Year = unique(t))
 
-for (i in 1:530){
-  FOI_table$foi[i] = boot.ci(results, type="perc", index = i)$t0
-  FOI_table$foi_LB[i] = boot.ci(results, type="perc", index = i)$percent[4]
-  FOI_table$foi_UB[i] = boot.ci(results, type="perc", index = i)$percent[5]
+n_rows = nrow(FOI_table)
+FOI_table$FOI = NA
+FOI_table$LB = NA
+FOI_table$UB = NA
+
+for (i in 1:n_rows) {
+  ci = tryCatch(boot.ci(results, type = "perc", index = i), error = function(e) return(NULL))
+  if (!is.null(ci) && !is.null(ci$percent)) {
+    FOI_table$FOI[i] = ci$t0
+    FOI_table$LB[i] = ci$percent[4]
+    FOI_table$UB[i] = ci$percent[5]
+  }
 }
 
-names(FOI_table) = c("injdur", "Year", "FOI", "LB", "UB")
+#------------------ Plotting ------------------
 
-#tiff("FP_injdur_time_FOI.tiff", units="in", width=9, height=7, res=300)
-ggplot(data=FOI_table, aes(x=injdur, y=FOI)) +
+#Full FOI vs injecting duration plot by year
+ggplot(FOI_table, aes(x = injdur, y = FOI)) +
   geom_line(size = 1, color = "midnightblue") +
-  geom_ribbon(aes(ymin=LB, ymax=UB), alpha = 0.2) +
+  geom_ribbon(aes(ymin = LB, ymax = UB), alpha = 0.2) +
   xlab("Injecting Duration (years)") +
-  ylab("Force of infection") +
-  scale_x_continuous(limits = c(0, 38))+
-  facet_wrap(~ Year, nrow = 3)
-#dev.off()
+  ylab("Force of Infection") +
+  scale_x_continuous(limits = c(0, 38)) +
+  facet_wrap(~Year, nrow = 3)
 
-#Obtain years of interest for manuscript
-x3 = FOI_table %>%
-  subset(FOI_table$Year == 2011 |FOI_table$Year == 2014 |
-           FOI_table$Year == 2017 |FOI_table$Year == 2019)
+#Subset of years of interest
+x3 = FOI_table %>% filter(Year %in% c(2011, 2014, 2017, 2019))
 
-#Plot the FOI
-#tiff("fp_sub_FOI.tiff", units="in", width=9, height=7, res=300)
-ggplot(data=x3, aes(x=injdur, y=FOI)) +
+#FOI plot for selected years
+ggplot(x3, aes(x = injdur, y = FOI)) +
   geom_line(size = 1, color = "midnightblue") +
-  geom_ribbon(aes(ymin=LB, ymax=UB), alpha = 0.2) +
+  geom_ribbon(aes(ymin = LB, ymax = UB), alpha = 0.2) +
   xlab("Injecting Duration (years)") +
-  ylab("Force of infection") +
-  scale_x_continuous(limits = c(0, 38))+
-  facet_wrap(~ Year, nrow = 3)
-#dev.off()
+  ylab("Force of Infection") +
+  scale_x_continuous(limits = c(0, 38)) +
+  facet_wrap(~Year, nrow = 3)
 
-#Make a subset of the table that only contains specific age injecting groups
-FOI_table_IJ_subset = FOI_table %>% 
-  subset(FOI_table$injdur == 1 | FOI_table$injdur == 5 |
-           FOI_table$injdur == 10 | FOI_table$injdur == 15 |
-           FOI_table$injdur == 20)
+#Subset for specific injecting durations
+FOI_table_IJ_subset = FOI_table %>%
+  filter(injdur %in% c(1, 5, 10, 15, 20)) %>%
+  mutate(injdur = as.factor(injdur))
 
-#Make injecting duratoin a factor
-FOI_table_IJ_subset$injdur = as.factor(FOI_table_IJ_subset$injdur)
-
-#tiff("FP_time_FOI_ALL.tiff", units="in", width=9, height=7, res=300)
-ggplot(data=FOI_table_IJ_subset, aes(x=Year, y=FOI, colour = injdur)) +
+#FOI over time by injecting duration
+ggplot(FOI_table_IJ_subset, aes(x = Year, y = FOI, colour = injdur)) +
   geom_line() +
-  geom_ribbon(aes(ymin=LB, ymax=UB), alpha = 0.2) +
-  xlab("Survey year") +
-  ylab("Force of infection") +
-  scale_x_continuous(breaks=seq(2011,2020,by=1))+
-  scale_y_continuous(breaks=seq(0,0.2,by=0.05))+ 
-  labs(color='Injecting duration') 
-#dev.off()
+  geom_ribbon(aes(ymin = LB, ymax = UB), alpha = 0.2) +
+  xlab("Survey Year") +
+  ylab("Force of Infection") +
+  scale_x_continuous(breaks = 2011:2020) +
+  scale_y_continuous(breaks = seq(0, 0.2, by = 0.05)) +
+  labs(color = "Injecting Duration")
