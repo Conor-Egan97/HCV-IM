@@ -1,183 +1,159 @@
-#Load in libraries
+#Load required libraries
 library(magrittr)
 library(tidyverse)
 library(rms)
-library(Hmisc)
-library(ggplot2)
-library(ResourceSelection)
 library(boot)
-library(haven)
 
-######################Data preparation#########################################
-#Load in data - called uam
+#####################################
+#Data Preparation
+#####################################
 
-#Restrict to survey years 2011-2020
+#Load simulated data
+uam = read.csv("~/Desktop/simulated_uam_data.csv")
+
+#Filter data for survey years 2011-2020
 uam = uam %>%
-  subset(year %in% c("2011","2012","2013","2014","2015",
-                     "2016","2017","2018","2019","2020"))
+  filter(year %in% as.character(2011:2020))
 
-#Assume injecting duration of one
-uam$injdur[which(uam$injdur == 0)] = 1
+#Assume injecting duration of 1 for individuals reporting 0
+uam$injdur[uam$injdur == 0] = 1
 
-#Only keep the complete cases for the variables of interest in this analysis
-keep = c("injdur", "hcvdbs", "year")
-uam = uam[keep]
-uam = uam[complete.cases(uam), ]
+#Keep complete cases for relevant variables
+uam = uam %>%
+  select(injdur, hcvdbs, year) %>%
+  drop_na()
 
-#Create a variable that indicates survival i.e., opposite of HCV dbs status
+#Create binary survival variable: 1 = survived (HCV negative), 0 = not
 uam$surv = ifelse(uam$hcvdbs == 1, 0, 1)
 
-#Create data frame of variables of interest - order by injecting duration
+#Order variables for modeling
 y = uam$surv[order(uam$injdur)]
 a = uam$injdur[order(uam$injdur)]
 t = uam$year[order(uam$injdur)]
-neg = table(y, round(a), t)[1, , ]
-neg = as.vector(t(neg))
-pos = table(y, round(a), t)[2, , ]
-pos = as.vector(t(pos))
+t = as.numeric(t) - 2015  #Center time on 2015
+
+#Create table of outcomes by injecting duration and time
+neg = as.vector(t(table(y, round(a), t)[1, , ]))
+pos = as.vector(t(table(y, round(a), t)[2, , ]))
 tot = neg + pos
-df1 = data.frame(neg,pos,tot)
-df1 = subset(df1, tot!=0)
-df = unique(data.frame(a,t))
 
-#######################Natural cubic spline#####################################
-#Centered this on 2015
-t = t-median(t)
+df1 = data.frame(neg, pos, tot) %>%
+  filter(tot != 0)
+df = unique(data.frame(a, t))
 
-#Number of knots for best fitting model in injecting duration and time dims
-knots_q = as.vector(quantile(a, c(0.05, 0.23, 0.41, 0.59, 0.77, 0.95)))
-knots_q = c(0, knots_q)
-knots_qt = as.vector(quantile(t, c(0.1, 0.5, 0.9)))
+#####################################
+#Natural Cubic Spline Model
+#####################################
 
-#Fit the best fitting NCS
-fit.rcs.at = glm(y ~ (rcs(a, knots_q) + rcs(a, knots_q)%ia%rcs(t, knots_qt)) - 1,
-                 family = binomial(link = "log"))
+#Define knots for spline fitting
+knots_q = quantile(a, probs = c(0.05, 0.23, 0.41, 0.59, 0.77, 0.95)) %>%
+  c(0, .)
+knots_qt = quantile(t, probs = c(0.1, 0.5, 0.9))
 
-#Get the force of infection from this model
+#Fit the model
+fit.rcs.at = glm(y ~ (rcs(a, knots_q) + rcs(a, knots_q) %ia% rcs(t, knots_qt)) - 1,
+                  family = binomial(link = "log"))
+
+#Prepare for bootstrapping
 set.seed(477)
-
-#Make a data frame for boot CI
 df_3 = data.frame(y, a, t)
 
-#Make a function that returns the table of plausible values
+#Function to compute force of infection (FOI) from bootstrapped model
 IR_CI = function(data, indices) {
-  d <- data[indices,]
-  df  = as.data.frame(expand.grid(1:53, -4:5))
-  names(df) = c("a", "t")
-  fit = glm(d$y ~ (rcs(d$a, knots_q) + rcs(d$a,knots_q)%ia%rcs(d$t,knots_qt))-1,
-            family=binomial(link = "log"))
+  d = data[indices, ]
+  df = expand.grid(a = 1:53, t = -4:5)
   
-  #Calculate the other two coefficients
-  #First for the linear IJ term
-  knot_6_Aspline = (coef(fit)[2]*(0-30)/((30)^2)+
-                      coef(fit)[3]*(1-30)/((30)^2)+
-                      coef(fit)[4]*(5-30)/((30)^2)+
-                      coef(fit)[5]*(11-30)/((30)^2)+
-                      coef(fit)[6]*(15-30)/((30)^2))/(30-20) 
+  fit = glm(d$y ~ (rcs(d$a, knots_q) + rcs(d$a, knots_q) %ia% rcs(d$t, knots_qt)) - 1,
+             family = binomial(link = "log"))
   
-  knot_7_Aspline = -(coef(fit)[2]/((30)^2)+coef(fit)[3]/((30)^2)+
-                       coef(fit)[4]/((30)^2)+coef(fit)[5]/((30)^2)+
-                       coef(fit)[6]/((30)^2)+knot_6_Aspline)
+  #Compute spline-derived coefficients manually
+  coef_vals = coef(fit)
   
-  #Now for the interaction betwen the time spline and the linear IJ term
-  knot_2_A_Tspline = (coef(fit)[8]*(-4-4)/((8)^2))/(4) 
-  knot_3_A_Tspline = -(coef(fit)[8]/((8)^2)+knot_2_A_Tspline)
+  #Age spline (individual components and tail terms)
+  a_spline = function(a_val) {
+    terms = c(0, 1, 5, 11, 15, 20, 30)
+    weights = c(coef_vals[2:6], NA, NA)
+    weights[6] = (sum(coef_vals[2:6] * (terms[1:5] - 30) / 30^2)) / (30 - 20)
+    weights[7] = -sum(c(coef_vals[2:6], weights[6]) / 30^2)
+    sum(3 * weights * (pmax(a_val - terms, 0)^2))
+  }
   
-  #Now for the interaction betwen the IJ spline and the linear time term
-  knot_6_T_Aspline = (coef(fit)[9]*(0-30)/((30)^2)+
-                        coef(fit)[10]*(1-30)/((30)^2)+
-                        coef(fit)[11]*(5-30)/((30)^2) + 
-                        coef(fit)[12]*(11-30)/((30)^2) + 
-                        coef(fit)[13]*(15-30)/((30)^2))/(30-20)
+  #Time spline
+  t_spline = function(t_val) {
+    s1 = coef_vals[7] * t_val
+    s2 = coef_vals[8] * (pmax(t_val + 4, 0)^3) / (8^2)
+    s3 = ((coef_vals[8] * (-8) / 64) / 4) * (pmax(t_val, 0)^3)
+    s4 = -(coef_vals[8] / 64 + s3) * (pmax(t_val - 4, 0)^3)
+    s1 + s2 + s3 + s4
+  }
   
-  knot_7_T_Aspline = -(coef(fit)[9]/((30)^2)+
-                         coef(fit)[10]/((30)^2)+
-                         coef(fit)[11]/((30)^2)+
-                         coef(fit)[12]/((30)^2)+
-                         coef(fit)[13]/((30)^2)+
-                         knot_6_T_Aspline)
+  #Interaction spline
+  t_spline_a = function(a_val, t_val) {
+    terms = c(0, 1, 5, 11, 15, 20, 30)
+    weights = c(coef_vals[9:13], NA, NA)
+    weights[6] = (sum(coef_vals[9:13] * (terms[1:5] - 30) / 30^2)) / (30 - 20)
+    weights[7] = -sum(c(coef_vals[9:13], weights[6]) / 30^2)
+    sum(t_val * 3 * weights * (pmax(a_val - terms, 0)^2))
+  }
   
-  foi_A = (coef(fit)[1]) + (3/((30)^2))*(coef(fit)[2])*(pmax(df$a-0,0)^2) +
-    (3/((30)^2))*(coef(fit)[3])*(pmax(df$a-1,0)^2) +
-    (3/((30)^2))*(coef(fit)[4])*(pmax(df$a-5,0)^2) +
-    (3/((30)^2))*(coef(fit)[5])*(pmax(df$a-11,0)^2) +
-    (3/((30)^2))*(coef(fit)[6])*(pmax(df$a-15,0)^2) +
-    3*(knot_6_Aspline)*(pmax(df$a-20,0)^2) +
-    3*(knot_7_Aspline)*(pmax(df$a-30,0)^2)
+  #Final FOI computation
+  foi = mapply(function(a_val, t_val) {
+    - (coef_vals[1] + a_spline(a_val) + t_spline(t_val) + t_spline_a(a_val, t_val))
+  }, df$a, df$t)
   
-  foi_A_Tspline = (coef(fit)[7])*df$t +
-    (1/((8)^2))*(coef(fit)[8])*(pmax(df$t+4,0)^3) +
-    (knot_2_A_Tspline)*(pmax(df$t-0,0)^3) +
-    (knot_3_A_Tspline)*(pmax(df$t-4,0)^3)
-  
-  foi_T_Aspline = (df$t)*((3/((30)^2))*(coef(fit)[9])*(pmax(df$a-0,0)^2)  +
-                            (3/((30)^2))*(coef(fit)[10])*(pmax(df$a-1,0)^2) +
-                            (3/((30)^2))*(coef(fit)[11])*(pmax(df$a-5,0)^2) +
-                            (3/((30)^2))*(coef(fit)[12])*(pmax(df$a-11,0)^2) +
-                            (3/((30)^2))*(coef(fit)[13])*(pmax(df$a-15,0)^2) +
-                            3*(knot_6_T_Aspline)*(pmax(df$a-20,0)^2) +
-                            3*(knot_7_T_Aspline)*(pmax(df$a-30,0)^2))
-  
-  foi = foi_A + foi_A_Tspline + foi_T_Aspline
-  foi = -foi
   return(foi)
 }
 
-# bootstrapping with 1000 replications
-results = boot(data=df_3, statistic=IR_CI, R=1000)
+#Run bootstrapping
+results = boot(data = df_3, statistic = IR_CI, R = 1000)
 
-#Make a table with the plausible FOI values
-IR_table = as.data.frame(expand.grid(unique(a), unique(t)))
+#Construct FOI table
+IR_table = expand.grid(unique(a), unique(t)) %>%
+  setNames(c("injdur", "Year"))
 
-for (i in 1:530){
-  IR_table$IR[i] = boot.ci(results, type="perc", index = i)$t0
-  IR_table$IR_LB[i] = boot.ci(results, type="perc", index = i)$percent[4]
-  IR_table$IR_UB[i] = boot.ci(results, type="perc", index = i)$percent[5]
+for (i in 1:nrow(IR_table)) {
+  ci = boot.ci(results, type = "perc", index = i)
+  IR_table$IR[i] = ci$t0
+  IR_table$LB[i] = ci$percent[4]
+  IR_table$UB[i] = ci$percent[5]
 }
 
-IR_table$Var2 = IR_table$Var2 + 2015
+#Convert centered year back to actual year
+IR_table$Year = IR_table$Year + 2015
 
-names(IR_table) = c("injdur", "Year", "IR", "LB", "UB")
+#####################################
+#Plotting
+#####################################
 
-tiff("NCS_injdur_time_FOI.tiff", units="in", width=9, height=7, res=300)
-ggplot(data=IR_table, aes(x=injdur, y=IR)) +
+#Full FOI over time
+ggplot(IR_table, aes(x = injdur, y = IR)) +
   geom_line(size = 1, color = "red") +
-  geom_ribbon(aes(ymin=LB, ymax=UB), alpha = 0.2) +
+  geom_ribbon(aes(ymin = LB, ymax = UB), alpha = 0.2) +
   xlab("Injecting Duration (years)") +
   ylab("Incidence rate") +
   facet_wrap(~ Year, nrow = 3)
-dev.off()
 
-#Obtain years of interest for manuscript
+#Subset for selected years
 x3 = IR_table %>%
-  subset(IR_table$Year == 2011 |IR_table$Year == 2014 |
-           IR_table$Year == 2017 |IR_table$Year == 2019)
+  filter(Year %in% c(2011, 2014, 2017, 2019))
 
-#Plot the FOI
-ggplot(data=x3, aes(x=injdur, y=IR)) +
+ggplot(x3, aes(x = injdur, y = IR)) +
   geom_line(size = 1, color = "red") +
-  geom_ribbon(aes(ymin=LB, ymax=UB), alpha = 0.2) +
+  geom_ribbon(aes(ymin = LB, ymax = UB), alpha = 0.2) +
   xlab("Injecting Duration (years)") +
   ylab("Incidence rate") +
   facet_wrap(~ Year, nrow = 2)
 
-#Make a subset of the table that only contains specific age injecting groups
-FOI_table_IJ_subset = IR_table %>% 
-  subset(IR_table$injdur == 1 | IR_table$injdur == 5 |
-           IR_table$injdur == 10 | IR_table$injdur == 15 |
-           IR_table$injdur == 20)
+#Subset for specific injecting durations
+FOI_table_IJ_subset = IR_table %>%
+  filter(injdur %in% c(1, 5, 10, 15, 20)) %>%
+  mutate(injdur = as.factor(injdur))
 
-
-#Make injecting duratoin a factor
-FOI_table_IJ_subset$injdur = as.factor(FOI_table_IJ_subset$injdur)
-
-#tiff("FP_time_FOI_ALL.tiff", units="in", width=9, height=7, res=300)
-ggplot(data=FOI_table_IJ_subset, aes(x=Year, y=IR, colour = injdur)) +
+ggplot(FOI_table_IJ_subset, aes(x = Year, y = IR, colour = injdur)) +
   geom_line() +
-  geom_ribbon(aes(ymin=LB, ymax=UB), alpha = 0.2) +
+  geom_ribbon(aes(ymin = LB, ymax = UB), alpha = 0.2) +
   xlab("Survey year") +
   ylab("Force of infection") +
-  scale_x_continuous(breaks=seq(2011,2020,by=1))+
-  scale_y_continuous(breaks=seq(0,0.2,by=0.05))+ 
-  labs(color='Injecting duration') 
-#dev.off()
+  scale_x_continuous(breaks = 2011:2020) +
+  scale_y_continuous(breaks = seq(0, 0.2, by = 0.05)) +
+  labs(color = "Injecting duration")
