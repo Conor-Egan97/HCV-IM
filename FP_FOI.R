@@ -62,7 +62,7 @@ df_1 = data.frame(y, a, t)
 #Function to compute FOI from resampled data
 FOI_CI = function(data, indices) {
   d = data[indices, ]
-  df = expand.grid(a = 1:30, t = 2011:2020)
+  df = expand.grid(a = 1:53, t = 2011:2020)
   
   fit = tryCatch({
     glm(
