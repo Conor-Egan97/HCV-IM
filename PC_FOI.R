@@ -1,67 +1,71 @@
 #Load in relevant packages
 library(magrittr)
-library(stats4)
-library(bbmle)
-library(rAmCharts)
-library(LearnClust)
-library(dplyr)
-library(haven)
-library(boot)
+library(stats4) 
+library(bbmle) 
+library(rAmCharts) 
+library(LearnClust) 
+library(dplyr) 
+library(haven) 
+library(boot) 
 library(ggplot2)
 
-######################Data preperation#########################################
+###################### Data preparation #########################################
 
-#Load in data - called uam
+# Load simulated data
+uam = read.csv("~/Desktop/simulated_uam_data.csv")
 
-#Restrict to survey years 2011-2020
+# Restrict to survey years 2011-2020
 uam = uam %>%
   subset(year %in% c("2011","2012","2013","2014","2015",
                      "2016","2017","2018","2019","2020"))
 
-#Assume injecting duration of one
+# Assume injecting duration of one for those where it's zero
 uam$injdur[which(uam$injdur == 0)] = 1
 
-#Only keep the complete cases for the variables of interest in this analysis
+# Only keep the complete cases for the variables of interest
 keep = c("injdur", "hcvdbs", "year")
 uam = uam[keep]
 uam = uam[complete.cases(uam), ]
 
-#######################Piecewise constant#######################################
-#Aggregate data for the PC model
+####################### Piecewise constant #######################################
+# Aggregate data for the Piecewise Constant (PC) model
 uam1 = aggregate(hcvdbs ~ year + injdur, data = uam, sum, na.rm = T)
 colnames(uam1) = c("year", "injdur", "hcv")
+
+# Create a version of the data where hcvdbs is set to 1
 uam2 = uam
 uam2$hcvdbs = 1
 uam2 = aggregate(hcvdbs ~ year + injdur, data = uam2, sum, na.rm = T)
 colnames(uam2) = c("year", "injdur", "n")
+
+# Merge the two datasets
 data = merge(uam1, uam2, by=c("year", "injdur"))
 
-#Load in bespoke functions
-setwd("C:/Users/Conor.Egan/Documents/Ross FOI code")
+# Load in bespoke functions
 source("fn_mkcut.R")
 source("fn_univarATnoint.R")
 source("fn_getparamATnoint.R")
 source("fn_pred.R")
 
-#Calculate the injecting duration and time contributions
+# Calculate the injecting duration and time contributions
 data.hcv = mkcut(data, data$year, data$injdur,
-                 c(1900,1980,1990,1995,200,2005,2010,2015,2020),
+                 c(1900,1980,1990,1995,2000,2005,2010,2015,2020),
                  c(0,1,3,5,10,15,25,60))
 
-#Include sensitivity
+# Add a sensitivity factor
 data.hcv$senshcv = 1
 
-#Initial values for the multiplicative no interaction model
+# Initial values for the multiplicative no interaction model
 iv.t = rep(-4,8)
 iv.a = c(1,0,0,0,0,0)
 inits2 = c(iv.t,iv.a)
 
-#Optimise unknown parameters for model
+# Optimize unknown parameters for model
 modc2 = optim(inits2, univarATnoint, method = "BFGS", y = data.hcv$hcv,
               n = data.hcv$n, s = data.hcv$senshcv, data = data.hcv,
               control = list(trace = T, maxit = 500), hessian = T)
 
-#Obtain the suvival probability predictions
+# Obtain the survival probability predictions
 modc2.params = getparamATnoint(modc2)
 modc2.pred = pred(modc2.params$h, data.hcv, data.hcv$hcv, data.hcv$n,
                   data.hcv$senshcv)
@@ -70,20 +74,25 @@ colnames(hcv.pred) = c("year", "injdur", "n", "s")
 hcv.pred = cbind(hcv.pred, modc2.pred)
 hcv.pred = as.data.frame(hcv.pred)
 
-#Use bootstrapping to get confidence intervals
+# Bootstrapping to obtain confidence intervals
 set.seed(100)
 
-#Make a function that returns the desired values (prob ci or foi ci)
+# Function to calculate hazard for bootstrapping
 h_CI = function(data, indices) {
   data = data[indices, ]
+  
   #Same process as above
   data1 = aggregate(hcvdbs ~ year + injdur, data = data, sum, na.rm = T)
   colnames(data1) = c("year", "injdur", "hcv")
+  
   data2 = data
   data2$hcvdbs = 1
   data2 = aggregate(hcvdbs ~ year + injdur, data = data2, sum, na.rm = T)
   colnames(data2) = c("year", "injdur", "n")
+  
   data = merge(data1, data2, by=c("year", "injdur"))
+  
+  # Use the mkcut function to prepare the data
   data.hcv = mkcut(data, data$year, data$injdur,
                    c(1900,1980,1990,1995,200,2005,2010,2015,2020),
                    c(0,1,3,5,10,15,25,60))
@@ -91,9 +100,12 @@ h_CI = function(data, indices) {
   iv.t = rep(-4,8)
   iv.a = c(1,0,0,0,0,0)
   inits2 = c(iv.t,iv.a)
+  
+  # Fit the model
   modc2 = optim(inits2, univarATnoint, method = "BFGS", y = data.hcv$hcv,
                 n = data.hcv$n, s = data.hcv$senshcv, data = data.hcv,
                 control = list(trace = T, maxit = 500), hessian = T)
+  
   modc2.params = getparamATnoint(modc2)
   modc2.pred = pred(modc2.params$h, data.hcv, data.hcv$hcv, data.hcv$n,
                     data.hcv$senshcv)
@@ -102,7 +114,7 @@ h_CI = function(data, indices) {
   hcv.pred = cbind(hcv.pred, modc2.pred)
   hcv.pred = as.data.frame(hcv.pred)
   
-  #This part is to ensure the data frame sizes match the full data
+  # This part is to ensure the data frame sizes match the full data
   full.modc2.pred = data.frame(year = c(rep(2011,44), rep(2012,43),
                                         rep(2013,44), rep(2014,45),
                                         rep(2015,48), rep(2016,45),
@@ -250,27 +262,25 @@ hcv.pred = hcv.pred %>%
                            year > 2015 & injdur > 25 & injdur <= 60 ~
                              boot.ci(h_ci, type = "perc", index = 56)$percent[5]))
 
-#Plot the FOI
-tiff("pc_FOI.tiff", units="in", width=9, height=7, res=300)
+################### Visualization of the Results ##########################
+
+# Plot the results
 ggplot(hcv.pred, aes(x = injdur)) +
   geom_line(aes(y = hazard), size = 1, color = "green") +
   geom_ribbon(aes(ymin=lower, ymax=upper), alpha=0.2) +
   xlab("Injecting Duration (years)") +
   ylab("Force of Infection") +
   facet_wrap(.~year, ncol=4, scales = "free_y")
-dev.off()
 
 #Obtain years of interest for manuscript
 x3 = hcv.pred %>%
   subset(hcv.pred$year == 2011 |hcv.pred$year == 2014 |
            hcv.pred$year == 2017 |hcv.pred$year == 2019)
 
-#Plot the FOI
-#tiff("fp_sub_FOI.tiff", units="in", width=9, height=7, res=300)
+
 ggplot(x3, aes(x = injdur)) +
   geom_line(aes(y = hazard), size = 1, color = "green") +
   geom_ribbon(aes(ymin=lower, ymax=upper), alpha=0.2) +
   xlab("Injecting Duration") +
   ylab("Force of Infection") +
   facet_wrap(.~year, ncol=2, scales = "free_y")
-#dev.off()
