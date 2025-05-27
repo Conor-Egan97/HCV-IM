@@ -42,10 +42,10 @@ colnames(uam2) = c("year", "injdur", "n")
 data = merge(uam1, uam2, by=c("year", "injdur"))
 
 # Load in bespoke functions
-source("fn_mkcut.R")
-source("fn_univarATnoint.R")
-source("fn_getparamATnoint.R")
-source("fn_pred.R")
+source("PC functions/fn_mkcut.R")
+source("PC functions/fn_univarATnoint.R")
+source("PC functions/fn_getparamATnoint.R")
+source("PC functions/fn_pred.R")
 
 # Calculate the injecting duration and time contributions
 data.hcv = mkcut(data, data$year, data$injdur,
